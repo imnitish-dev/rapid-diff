@@ -2,18 +2,18 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import fs from 'node:fs';
-import { greet, backend } from 'template-pkg';
+import { diffLines, backend } from 'rapid-diff';
 
 test(`backend is ${backend}`, () => {
   assert.ok(['native', 'wasm'].includes(backend));
   // CI sets this so a missing or broken native binary fails loudly instead of silently using WASM.
-  if (process.env.TEMPLATE_PKG_EXPECT) assert.equal(backend, process.env.TEMPLATE_PKG_EXPECT);
+  if (process.env.RAPID_DIFF_EXPECT) assert.equal(backend, process.env.RAPID_DIFF_EXPECT);
 });
 
-test('greet', () => assert.equal(greet('you'), 'Hello, you!'));
-
 test('CommonJS require works too', () => {
-  assert.equal(createRequire(import.meta.url)('template-pkg').greet('cjs'), 'Hello, cjs!');
+  const cjs = createRequire(import.meta.url)('rapid-diff');
+  assert.equal(cjs.diffLines('a\n', 'b\n').length, 2);
+  assert.equal(diffLines('a\n', 'a\n').length, 1);
 });
 
 test('index.d.cts matches index.d.ts', () => {

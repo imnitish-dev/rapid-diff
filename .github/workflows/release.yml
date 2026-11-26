@@ -27,7 +27,7 @@ jobs:
       - name: Tag must match package.json version
         run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
       - uses: actions/download-artifact@v8
-        with: { name: template-pkg-tarball }
-      - run: npm publish ./template-pkg-*.tgz --provenance --access public
-      - run: gh release create "$GITHUB_REF_NAME" ./template-pkg-*.tgz --generate-notes
+        with: { name: rapid-diff-tarball }
+      - run: npm publish ./rapid-diff-*.tgz --provenance --access public
+      - run: gh release create "$GITHUB_REF_NAME" ./rapid-diff-*.tgz --generate-notes
         env: { GH_TOKEN: '${{ github.token }}' }

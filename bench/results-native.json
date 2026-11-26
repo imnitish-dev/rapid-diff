@@ -1,0 +1,50 @@
+[
+  {
+    "name": "Large file, small edit (360 KB, ~2% of lines)",
+    "fn": "diffLines",
+    "jsdiff": 15.997750000000003,
+    "rapid": 5.441417000000001
+  },
+  {
+    "name": "Large file, small edit (360 KB, ~2% of lines)",
+    "fn": "createTwoFilesPatch",
+    "jsdiff": 16.18874999999997,
+    "rapid": 6.3276670000000195
+  },
+  {
+    "name": "Typical source file (20 KB, a few edits)",
+    "fn": "diffLines",
+    "jsdiff": 0.9808329999999614,
+    "rapid": 0.28837500000003047
+  },
+  {
+    "name": "Typical source file (20 KB, a few edits)",
+    "fn": "createTwoFilesPatch",
+    "jsdiff": 1.0405000000000086,
+    "rapid": 0.3589579999999728
+  },
+  {
+    "name": "1,000 small diffs (2 KB each)",
+    "fn": "diffLines",
+    "jsdiff": 13.393750000000011,
+    "rapid": 12.62420800000001
+  },
+  {
+    "name": "1,000 small diffs (2 KB each)",
+    "fn": "createTwoFilesPatch",
+    "jsdiff": 23.290750000000003,
+    "rapid": 22.217083000000002
+  },
+  {
+    "name": "Completely different files (2,000 lines each)",
+    "fn": "diffLines",
+    "jsdiff": 415.2145409999998,
+    "rapid": 92.66399999999976
+  },
+  {
+    "name": "Completely different files (2,000 lines each)",
+    "fn": "createTwoFilesPatch",
+    "jsdiff": 417.0301250000002,
+    "rapid": 93.38741699999991
+  }
+]

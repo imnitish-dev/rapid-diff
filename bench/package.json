@@ -1,8 +1,9 @@
 {
-  "name": "template-pkg-bench",
+  "name": "rapid-diff-bench",
   "private": true,
   "type": "module",
   "dependencies": {
-    "template-pkg": "file:.."
+    "diff": "9",
+    "rapid-diff": "file:.."
   }
 }

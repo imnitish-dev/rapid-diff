@@ -1,5 +1,5 @@
 [package]
-name = "template-pkg"
+name = "rapid-diff"
 version = "0.0.0"
 edition = "2021"
 license = "MIT"
@@ -13,6 +13,7 @@ napi = ["dep:napi", "dep:napi-derive"]
 wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
+rustc-hash = "2"
 napi = { version = "3", default-features = false, features = ["napi4"], optional = true }
 napi-derive = { version = "3", optional = true }
 wasm-bindgen = { version = "=0.2.130", optional = true }
