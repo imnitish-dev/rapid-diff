@@ -1,0 +1,27 @@
+[package]
+name = "template-pkg"
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+napi = ["dep:napi", "dep:napi-derive"]
+wasm = ["dep:wasm-bindgen"]
+
+[dependencies]
+napi = { version = "3", default-features = false, features = ["napi4"], optional = true }
+napi-derive = { version = "3", optional = true }
+wasm-bindgen = { version = "=0.2.130", optional = true }
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = "symbols"

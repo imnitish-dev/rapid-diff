@@ -1,0 +1,174 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call: # release.yml runs the full pipeline before publishing
+  schedule:
+    - cron: '0 3 * * 1' # weekly: catch newly published advisories against unchanged code
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+
+  audit:
+    name: Vulnerability + license audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-deny }
+      - run: cargo deny check
+      - name: TypeScript types resolve correctly in every module mode
+        run: npx --yes @arethetypeswrong/cli --pack .
+      - name: npm audit (every folder with a lockfile)
+        run: |
+          for lock in $(git ls-files '*package-lock.json'); do
+            d=$(dirname "$lock"); echo "== $d"
+            # bench/ installs competitors (some with known, unpatched advisories): report, don't fail.
+            if [ "$d" = bench ]; then (cd "$d" && npm audit) || true; else (cd "$d" && npm audit --audit-level=moderate) || exit 1; fi
+          done
+
+  native:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.host }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: macos-latest, target: aarch64-apple-darwin }
+          - { host: macos-latest, target: x86_64-apple-darwin }
+          - { host: ubuntu-latest, target: x86_64-unknown-linux-gnu, flags: --use-napi-cross }
+          - { host: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { host: ubuntu-latest, target: x86_64-unknown-linux-musl, flags: -x }
+          - { host: windows-latest, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: 22 }
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: '${{ matrix.target }}' }
+      - if: matrix.flags == '-x'
+        run: python3 -m pip install --user --break-system-packages ziglang # zig for cargo-zigbuild, from PyPI's CDN (setup-zig's mirrors can hang)
+      - if: matrix.flags == '-x'
+        uses: taiki-e/install-action@v2
+        with: { tool: cargo-zigbuild }
+      - run: npm ci
+      - run: npx napi build --platform --release --features napi --output-dir native --target ${{ matrix.target }} ${{ matrix.flags }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-${{ matrix.target }}
+          path: native/*.node
+          if-no-files-found: error
+
+  wasm:
+    name: Build WASM
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: wasm32-unknown-unknown }
+      - uses: taiki-e/install-action@v2
+        with: { tool: wasm-bindgen-cli@0.2.130 }
+      - run: npm run build:wasm
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wasm
+          path: |
+            wasm/template_pkg.js
+            wasm/template_pkg_bg.wasm
+          if-no-files-found: error
+
+  test:
+    name: Test ${{ matrix.host }} / Node ${{ matrix.node }}
+    needs: [native, wasm]
+    runs-on: ${{ matrix.host }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { host: macos-latest, node: 24 }
+          - { host: ubuntu-latest, node: 20 }
+          - { host: ubuntu-latest, node: 22 }
+          - { host: ubuntu-latest, node: 24 }
+          - { host: ubuntu-24.04-arm, node: 22 }
+          - { host: windows-latest, node: 22 }
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: '${{ matrix.node }}' }
+      - uses: actions/download-artifact@v8
+        with: { path: native, pattern: native-*, merge-multiple: true }
+      - uses: actions/download-artifact@v8
+        with: { path: wasm, name: wasm }
+      - run: npm test
+        env: { TEMPLATE_PKG_EXPECT: native }
+      - run: npm test
+        env: { TEMPLATE_PKG_FORCE_WASM: '1', TEMPLATE_PKG_EXPECT: wasm }
+
+  test-musl:
+    name: Test Alpine (musl)
+    needs: [native, wasm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container: node:22-alpine
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with: { path: native, pattern: native-*, merge-multiple: true }
+      - uses: actions/download-artifact@v8
+        with: { path: wasm, name: wasm }
+      - run: npm test
+        env: { TEMPLATE_PKG_EXPECT: native }
+
+  test-bun:
+    name: Test Bun
+    needs: [native, wasm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/download-artifact@v8
+        with: { path: native, pattern: native-*, merge-multiple: true }
+      - uses: actions/download-artifact@v8
+        with: { path: wasm, name: wasm }
+      - run: bun -e "const m = await import('template-pkg'); if (m.backend !== 'native') process.exit(1); console.log('bun ok', m.backend)"
+
+  pack:
+    name: npm pack
+    needs: [rust, audit, test, test-musl, test-bun]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: 22 }
+      - uses: actions/download-artifact@v8
+        with: { path: native, pattern: native-*, merge-multiple: true }
+      - uses: actions/download-artifact@v8
+        with: { path: wasm, name: wasm }
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-about }
+      - name: Third-party notices for the Rust code inside the binaries
+        run: cargo about generate --features napi,wasm about.hbs > THIRD-PARTY-LICENSES.md
+      - run: ls native wasm && npm pack && tar -tzf template-pkg-*.tgz
+      - uses: actions/upload-artifact@v7
+        with:
+          name: template-pkg-tarball
+          path: template-pkg-*.tgz

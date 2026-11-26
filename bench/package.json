@@ -1,0 +1,8 @@
+{
+  "name": "template-pkg-bench",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "template-pkg": "file:.."
+  }
+}

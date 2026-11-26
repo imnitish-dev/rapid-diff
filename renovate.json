@@ -1,0 +1,35 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests", ":semanticCommitsDisabled"],
+  "timezone": "Asia/Kolkata",
+  "schedule": ["before 6am on monday"],
+  "minimumReleaseAge": "3 days",
+  "internalChecksFilter": "strict",
+  "lockFileMaintenance": { "enabled": true },
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": { "minimumReleaseAge": null, "schedule": ["at any time"], "labels": ["security"] },
+  "packageRules": [
+    {
+      "description": "Small updates merge themselves once CI is green",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest", "lockFileMaintenance"],
+      "groupName": "non-major dependencies",
+      "automerge": true
+    },
+    {
+      "description": "wasm-bindgen crate and CLI must always be the same version",
+      "matchPackageNames": ["wasm-bindgen", "wasm-bindgen-cli"],
+      "groupName": "wasm-bindgen",
+      "automerge": false
+    }
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "wasm-bindgen-cli version used in CI",
+      "managerFilePatterns": ["/^\\.github/workflows/.+\\.yml$/"],
+      "matchStrings": ["tool: wasm-bindgen-cli@(?<currentValue>[0-9.]+)"],
+      "depNameTemplate": "wasm-bindgen-cli",
+      "datasourceTemplate": "crate"
+    }
+  ]
+}

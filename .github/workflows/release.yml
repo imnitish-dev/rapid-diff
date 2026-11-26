@@ -1,0 +1,33 @@
+name: Release
+
+# Release = `npm version patch|minor|major && git push --follow-tags`.
+# The full CI pipeline (all platforms, tests, XSS suite, audits) must pass before anything is published.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: write # GitHub release
+      id-token: write # npm trusted publishing + provenance, no token stored anywhere
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with: { node-version: 24, registry-url: 'https://registry.npmjs.org' }
+      - name: Tag must match package.json version
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
+      - uses: actions/download-artifact@v8
+        with: { name: template-pkg-tarball }
+      - run: npm publish ./template-pkg-*.tgz --provenance --access public
+      - run: gh release create "$GITHUB_REF_NAME" ./template-pkg-*.tgz --generate-notes
+        env: { GH_TOKEN: '${{ github.token }}' }

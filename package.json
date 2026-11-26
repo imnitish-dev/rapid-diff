@@ -1,0 +1,86 @@
+{
+  "name": "template-pkg",
+  "version": "0.0.0",
+  "description": "TEMPLATE_DESCRIPTION",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imnitish-dev/template-pkg.git"
+  },
+  "homepage": "https://github.com/imnitish-dev/template-pkg#readme",
+  "bugs": "https://github.com/imnitish-dev/template-pkg/issues",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "workerd": {
+        "types": "./index.d.ts",
+        "default": "./lib/edge.js"
+      },
+      "edge-light": {
+        "types": "./index.d.ts",
+        "default": "./lib/edge.js"
+      },
+      "deno": {
+        "types": "./index.d.ts",
+        "default": "./lib/web.js"
+      },
+      "browser": {
+        "types": "./index.d.ts",
+        "default": "./lib/web.js"
+      },
+      "node": {
+        "import": {
+          "types": "./index.d.ts",
+          "default": "./lib/node.mjs"
+        },
+        "require": {
+          "types": "./index.d.cts",
+          "default": "./lib/node.cjs"
+        }
+      },
+      "default": {
+        "types": "./index.d.ts",
+        "default": "./lib/web.js"
+      }
+    }
+  },
+  "files": [
+    "lib",
+    "native/*.node",
+    "wasm/template_pkg.js",
+    "wasm/template_pkg_bg.wasm",
+    "index.d.ts",
+    "index.d.cts",
+    "LICENSE",
+    "THIRD-PARTY-LICENSES.md"
+  ],
+  "keywords": [
+    "rust",
+    "wasm",
+    "napi"
+  ],
+  "napi": {
+    "binaryName": "template-pkg",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "build:native": "napi build --platform --release --features napi --output-dir native --no-js",
+    "build:wasm": "cargo build --release --target wasm32-unknown-unknown --features wasm && wasm-bindgen target/wasm32-unknown-unknown/release/template_pkg.wasm --target web --out-dir wasm --out-name template_pkg",
+    "build": "npm run build:native && npm run build:wasm",
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.11.1"
+  }
+}
