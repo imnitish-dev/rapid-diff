@@ -3,10 +3,11 @@
 //! Line diffs that match jsdiff's `diffLines` output exactly: the Myers search below is a
 //! faithful port of jsdiff's `base.js` (BSD-3-Clause, Copyright (c) 2009-2015 Kevin Decker),
 //! including its tie-breaking, so results are identical, not merely equivalent. The speed comes
-//! from interning every line to an integer once and returning offsets instead of strings.
+//! from reading JS strings as raw UTF-16 (no re-encoding), interning every line to an integer
+//! once, and returning offsets instead of strings.
 
 use rustc_hash::FxHashMap as HashMap;
-use std::rc::Rc;
+use std::borrow::Cow;
 
 pub const IGNORE_WHITESPACE: u32 = 1;
 pub const IGNORE_NEWLINE_AT_EOF: u32 = 2;
@@ -14,91 +15,132 @@ pub const NEWLINE_IS_TOKEN: u32 = 4;
 pub const IGNORE_CASE: u32 = 8;
 pub const ONE_CHANGE_PER_TOKEN: u32 = 16;
 
-/// One token: its text plus its position in the original string in UTF-16 units (JS indexes).
-struct Token<'a> {
-  text: &'a str,
-  start16: u32,
-  end16: u32,
+/// One token as a range of UTF-16 units, which are also the JS string indexes.
+#[derive(Clone, Copy)]
+struct Token {
+  start: u32,
+  end: u32,
 }
 
 /// jsdiff's line tokenizer: `value.split(/(\n|\r\n)/)`, merged back into "line + separator"
 /// tokens (or separate tokens with `newlineIsToken`), empty tokens removed.
-fn tokenize(s: &str, newline_is_token: bool) -> Vec<Token<'_>> {
+fn tokenize(s: &[u16], newline_is_token: bool) -> Vec<Token> {
   let mut out = Vec::new();
-  let mut pos16 = 0u32;
-  let mut rest = s;
-  while !rest.is_empty() {
-    let (line, sep) = match rest.find('\n') {
-      Some(i) => {
-        let sep_start = if i > 0 && rest.as_bytes()[i - 1] == b'\r' { i - 1 } else { i };
-        (&rest[..sep_start], &rest[sep_start..=i])
-      }
-      None => (rest, ""),
+  let mut pos = 0usize;
+  while pos < s.len() {
+    let (line_end, end) = match s[pos..].iter().position(|&c| c == b'\n' as u16) {
+      Some(i) => (pos + if i > 0 && s[pos + i - 1] == b'\r' as u16 { i - 1 } else { i }, pos + i + 1),
+      None => (s.len(), s.len()),
     };
-    // JS positions are UTF-16 units; for ASCII (most code) that's just the byte length.
-    let line16 = if line.is_ascii() { line.len() } else { line.encode_utf16().count() } as u32;
-    let sep16 = sep.len() as u32; // "\n" or "\r\n": ASCII
     if newline_is_token {
-      if !line.is_empty() {
-        out.push(Token { text: line, start16: pos16, end16: pos16 + line16 });
+      if line_end > pos {
+        out.push(Token { start: pos as u32, end: line_end as u32 });
       }
-      if !sep.is_empty() {
-        out.push(Token { text: sep, start16: pos16 + line16, end16: pos16 + line16 + sep16 });
+      if end > line_end {
+        out.push(Token { start: line_end as u32, end: end as u32 });
       }
     } else {
-      let len = line.len() + sep.len();
-      out.push(Token { text: &rest[..len], start16: pos16, end16: pos16 + line16 + sep16 });
+      out.push(Token { start: pos as u32, end: end as u32 });
     }
-    pos16 += line16 + sep16;
-    rest = &rest[line.len() + sep.len()..];
+    pos = end;
   }
   out
 }
 
-/// JavaScript's String.prototype.trim() whitespace set (differs from Rust's: +U+FEFF, -U+0085).
-fn js_trim(s: &str) -> &str {
-  let ws = |c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}';
-  s.trim_matches(ws)
+/// JavaScript's String.prototype.trim() whitespace set (all in the BMP, so one UTF-16 unit each).
+fn is_js_ws(c: u16) -> bool {
+  matches!(c, 0x09..=0x0d | 0x20 | 0xa0 | 0x1680 | 0x2000..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff)
+}
+fn js_trim(s: &[u16]) -> &[u16] {
+  let start = s.iter().position(|&c| !is_js_ws(c)).unwrap_or(s.len());
+  let end = s.iter().rposition(|&c| !is_js_ws(c)).map_or(start, |i| i + 1);
+  &s[start..end]
 }
 
-/// The string two tokens are compared by, after jsdiff's LineDiff.equals transformations.
-fn key<'a>(tok: &'a str, flags: u32) -> std::borrow::Cow<'a, str> {
+/// The units two tokens are compared by, after jsdiff's LineDiff.equals transformations.
+fn key(tok: &[u16], flags: u32) -> Cow<'_, [u16]> {
   let mut t = tok;
   if flags & IGNORE_WHITESPACE != 0 {
-    if flags & NEWLINE_IS_TOKEN == 0 || !t.contains('\n') {
+    if flags & NEWLINE_IS_TOKEN == 0 || !t.contains(&(b'\n' as u16)) {
       t = js_trim(t);
     }
   } else if flags & IGNORE_NEWLINE_AT_EOF != 0 && flags & NEWLINE_IS_TOKEN == 0 {
-    t = t.strip_suffix('\n').unwrap_or(t);
+    t = t.strip_suffix(&[b'\n' as u16]).unwrap_or(t);
   }
   if flags & IGNORE_CASE != 0 {
-    std::borrow::Cow::Owned(t.to_lowercase())
+    Cow::Owned(String::from_utf16_lossy(t).to_lowercase().encode_utf16().collect())
   } else {
-    std::borrow::Cow::Borrowed(t)
+    Cow::Borrowed(t)
   }
 }
 
-fn intern<'a>(toks: &[Token<'a>], flags: u32, ids: &mut HashMap<std::borrow::Cow<'a, str>, u32>) -> Vec<u32> {
+fn intern<'a>(s: &'a [u16], toks: &[Token], flags: u32, ids: &mut HashMap<Cow<'a, [u16]>, u32>) -> Vec<u32> {
   toks
     .iter()
     .map(|t| {
       let next = ids.len() as u32;
-      *ids.entry(key(t.text, flags)).or_insert(next)
+      *ids.entry(key(&s[t.start as usize..t.end as usize], flags)).or_insert(next)
     })
     .collect()
 }
 
+const NONE: u32 = u32::MAX;
+
+/// A change object in jsdiff's linked list of components.
 struct Comp {
   count: u32,
   added: bool,
   removed: bool,
-  prev: Option<Rc<Comp>>,
+  prev: u32,
+  refs: u32,
 }
 
-#[derive(Clone)]
+/// Reference-counted components in one Vec with a free list: the same memory behaviour as
+/// jsdiff's garbage-collected objects (dead branches are reused), without a malloc per step.
+#[derive(Default)]
+struct Arena {
+  comps: Vec<Comp>,
+  free: Vec<u32>,
+}
+
+impl Arena {
+  /// New component holding one reference; takes over the caller's reference to `prev`.
+  fn alloc(&mut self, count: u32, added: bool, removed: bool, prev: u32) -> u32 {
+    let c = Comp { count, added, removed, prev, refs: 1 };
+    match self.free.pop() {
+      Some(i) => {
+        self.comps[i as usize] = c;
+        i
+      }
+      None => {
+        self.comps.push(c);
+        (self.comps.len() - 1) as u32
+      }
+    }
+  }
+  fn retain(&mut self, i: u32) -> u32 {
+    if i != NONE {
+      self.comps[i as usize].refs += 1;
+    }
+    i
+  }
+  fn release(&mut self, mut i: u32) {
+    while i != NONE {
+      let c = &mut self.comps[i as usize];
+      c.refs -= 1;
+      if c.refs > 0 {
+        return;
+      }
+      self.free.push(i);
+      i = c.prev;
+    }
+  }
+}
+
+#[derive(Clone, Copy)]
 struct Path {
   old_pos: i64,
-  last: Option<Rc<Comp>>,
+  last: u32,
 }
 
 /// Wall clock in ms, for jsdiff's `timeout` option.
@@ -119,7 +161,7 @@ fn now_ms() -> f64 {
 /// Diff two strings by lines. Returns `[kind, count, start16, end16]` per change object
 /// (kind 0 = common, 1 = added, 2 = removed; offsets index the new string for kinds 0/1 and the
 /// old string for kind 2), or `None` when `maxEditLength`/`timeout` is exceeded (jsdiff: undefined).
-pub fn diff_lines(old: &str, new: &str, flags: u32, max_edit_length: Option<f64>, timeout_ms: Option<f64>) -> Option<Vec<u32>> {
+pub fn diff_lines(old: &[u16], new: &[u16], flags: u32, max_edit_length: Option<f64>, timeout_ms: Option<f64>) -> Option<Vec<u32>> {
   let nl_token = flags & NEWLINE_IS_TOKEN != 0;
   let one_per_token = flags & ONE_CHANGE_PER_TOKEN != 0;
   let old_toks = tokenize(old, nl_token);
@@ -127,11 +169,12 @@ pub fn diff_lines(old: &str, new: &str, flags: u32, max_edit_length: Option<f64>
 
   // Intern by comparison key: equal lines get equal ids, so the search compares integers.
   let mut ids = HashMap::with_capacity_and_hasher(old_toks.len() + new_toks.len(), Default::default());
-  let o = intern(&old_toks, flags, &mut ids);
-  let n = intern(&new_toks, flags, &mut ids);
+  let o = intern(old, &old_toks, flags, &mut ids);
+  let n = intern(new, &new_toks, flags, &mut ids);
   let (old_len, new_len) = (o.len() as i64, n.len() as i64);
 
-  let extract_common = |base: &mut Path, diagonal: i64| -> i64 {
+  let mut arena = Arena::default();
+  let extract_common = |arena: &mut Arena, base: &mut Path, diagonal: i64| -> i64 {
     let mut old_pos = base.old_pos;
     let mut new_pos = old_pos - diagonal;
     let mut common = 0;
@@ -140,37 +183,42 @@ pub fn diff_lines(old: &str, new: &str, flags: u32, max_edit_length: Option<f64>
       old_pos += 1;
       common += 1;
       if one_per_token {
-        base.last = Some(Rc::new(Comp { count: 1, added: false, removed: false, prev: base.last.take() }));
+        base.last = arena.alloc(1, false, false, base.last);
       }
     }
     if common > 0 && !one_per_token {
-      base.last = Some(Rc::new(Comp { count: common, added: false, removed: false, prev: base.last.take() }));
+      base.last = arena.alloc(common, false, false, base.last);
     }
     base.old_pos = old_pos;
     new_pos
   };
-  let add_to_path = |path: &Path, added: bool, removed: bool, old_inc: i64| -> Path {
-    let last = &path.last;
-    let comp = match last {
-      Some(l) if !one_per_token && l.added == added && l.removed == removed => Comp { count: l.count + 1, added, removed, prev: l.prev.clone() },
-      _ => Comp { count: 1, added, removed, prev: last.clone() },
+  let add_to_path = |arena: &mut Arena, path: Path, added: bool, removed: bool, old_inc: i64| -> Path {
+    let l = path.last;
+    let last = if l != NONE && !one_per_token && arena.comps[l as usize].added == added && arena.comps[l as usize].removed == removed {
+      let (count, prev) = (arena.comps[l as usize].count, arena.comps[l as usize].prev);
+      let prev = arena.retain(prev);
+      arena.alloc(count + 1, added, removed, prev)
+    } else {
+      let prev = arena.retain(l);
+      arena.alloc(1, added, removed, prev)
     };
-    Path { old_pos: path.old_pos + old_inc, last: Some(Rc::new(comp)) }
+    Path { old_pos: path.old_pos + old_inc, last }
   };
 
-  let build = |last: Option<Rc<Comp>>| -> Vec<u32> {
+  let build = |arena: &Arena, last: u32| -> Vec<u32> {
     let mut comps = Vec::new();
     let mut cur = last;
-    while let Some(c) = cur {
+    while cur != NONE {
+      let c = &arena.comps[cur as usize];
       comps.push((c.count, c.added, c.removed));
-      cur = c.prev.clone();
+      cur = c.prev;
     }
     comps.reverse();
     let (mut np, mut op) = (0usize, 0usize);
     let mut out = Vec::with_capacity(comps.len() * 4);
-    let range = |toks: &[Token<'_>], from: usize, count: usize| match count {
+    let range = |toks: &[Token], from: usize, count: usize| match count {
       0 => (0, 0),
-      _ => (toks[from].start16, toks[from + count - 1].end16),
+      _ => (toks[from].start, toks[from + count - 1].end),
     };
     for (count, added, removed) in comps {
       let c = count as usize;
@@ -197,10 +245,10 @@ pub fn diff_lines(old: &str, new: &str, flags: u32, max_edit_length: Option<f64>
   let offset = new_len + old_len + 1; // diagonal d lives at index d + offset
   let mut best: Vec<Option<Path>> = vec![None; size];
 
-  let mut first = Path { old_pos: -1, last: None };
-  let new_pos = extract_common(&mut first, 0);
+  let mut first = Path { old_pos: -1, last: NONE };
+  let new_pos = extract_common(&mut arena, &mut first, 0);
   if first.old_pos + 1 >= old_len && new_pos + 1 >= new_len {
-    return Some(build(first.last));
+    return Some(build(&arena, first.last));
   }
   best[offset as usize] = Some(first);
 
@@ -210,25 +258,33 @@ pub fn diff_lines(old: &str, new: &str, flags: u32, max_edit_length: Option<f64>
     let mut diag = min_diag.max(-edit_len);
     while diag <= max_diag.min(edit_len) {
       let remove_path = best[(diag - 1 + offset) as usize].take(); // nobody else will use it
-      let add_path = best[(diag + 1 + offset) as usize].clone();
+      let add_path = best[(diag + 1 + offset) as usize]; // borrowed: stays in `best`
       let can_add = add_path.as_ref().is_some_and(|p| {
         let add_new_pos = p.old_pos - diag;
         0 <= add_new_pos && add_new_pos < new_len
       });
       let can_remove = remove_path.as_ref().is_some_and(|p| p.old_pos + 1 < old_len);
       if !can_add && !can_remove {
-        best[(diag + offset) as usize] = None;
+        if let Some(p) = best[(diag + offset) as usize].take() {
+          arena.release(p.last);
+        }
+        if let Some(p) = remove_path {
+          arena.release(p.last);
+        }
         diag += 2;
         continue;
       }
-      let mut base = if !can_remove || (can_add && remove_path.as_ref().unwrap().old_pos < add_path.as_ref().unwrap().old_pos) {
-        add_to_path(add_path.as_ref().unwrap(), true, false, 0)
+      let mut base = if !can_remove || (can_add && remove_path.unwrap().old_pos < add_path.unwrap().old_pos) {
+        add_to_path(&mut arena, add_path.unwrap(), true, false, 0)
       } else {
-        add_to_path(remove_path.as_ref().unwrap(), false, true, 1)
+        add_to_path(&mut arena, remove_path.unwrap(), false, true, 1)
       };
-      let new_pos = extract_common(&mut base, diag);
+      if let Some(p) = remove_path {
+        arena.release(p.last);
+      }
+      let new_pos = extract_common(&mut arena, &mut base, diag);
       if base.old_pos + 1 >= old_len && new_pos + 1 >= new_len {
-        return Some(build(base.last));
+        return Some(build(&arena, base.last));
       }
       if base.old_pos + 1 >= old_len {
         max_diag = max_diag.min(diag - 1);
@@ -236,7 +292,9 @@ pub fn diff_lines(old: &str, new: &str, flags: u32, max_edit_length: Option<f64>
       if new_pos + 1 >= new_len {
         min_diag = min_diag.max(diag + 1);
       }
-      best[(diag + offset) as usize] = Some(base);
+      if let Some(p) = best[(diag + offset) as usize].replace(base) {
+        arena.release(p.last);
+      }
       diag += 2;
     }
     edit_len += 1;
@@ -249,7 +307,7 @@ mod node {
   use napi_derive::napi;
 
   #[napi]
-  pub fn diff_lines_raw(old: String, new: String, flags: u32, max_edit_length: Option<f64>, timeout: Option<f64>) -> Option<Vec<u32>> {
+  pub fn diff_lines_raw(old: napi::bindgen_prelude::Utf16String, new: napi::bindgen_prelude::Utf16String, flags: u32, max_edit_length: Option<f64>, timeout: Option<f64>) -> Option<Vec<u32>> {
     super::diff_lines(&old, &new, flags, max_edit_length, timeout)
   }
 }
@@ -258,8 +316,9 @@ mod node {
 mod web {
   use wasm_bindgen::prelude::*;
 
-  #[wasm_bindgen(js_name = diffLinesRaw)]
-  pub fn diff_lines_raw(old: &str, new: &str, flags: u32, max_edit_length: Option<f64>, timeout: Option<f64>) -> Option<Vec<u32>> {
+  /// Takes UTF-16 code units; lib/binding.js converts the strings.
+  #[wasm_bindgen(js_name = diffLinesRaw16)]
+  pub fn diff_lines_raw16(old: &[u16], new: &[u16], flags: u32, max_edit_length: Option<f64>, timeout: Option<f64>) -> Option<Vec<u32>> {
     super::diff_lines(old, new, flags, max_edit_length, timeout)
   }
 }
@@ -271,7 +330,7 @@ mod tests {
   fn values(old: &str, new: &str, flags: u32) -> Vec<(u32, String)> {
     let enc = |s: &str| s.encode_utf16().collect::<Vec<_>>();
     let (o16, n16) = (enc(old), enc(new));
-    diff_lines(old, new, flags, None, None)
+    diff_lines(&o16, &n16, flags, None, None)
       .unwrap()
       .chunks(4)
       .map(|c| {
@@ -302,12 +361,16 @@ mod tests {
     assert_eq!(values("\u{feff}a\n", "a\n", IGNORE_WHITESPACE), vec![(0, "a\n".into())]); // JS trim strips BOM
     assert_eq!(values("a", "a\n", IGNORE_NEWLINE_AT_EOF), vec![(0, "a\n".into())]);
     assert_eq!(values("a\nb\n", "a\nb\n", NEWLINE_IS_TOKEN).len(), 1);
-    assert_eq!(diff_lines("a\nb\nc\n", "x\ny\nz\n", 0, Some(1.0), None), None);
+    let enc = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+    assert_eq!(diff_lines(&enc("a\nb\nc\n"), &enc("x\ny\nz\n"), 0, Some(1.0), None), None);
   }
 
   #[test]
   fn tokenizer_matches_js_split() {
-    let toks = |s: &str, nl| tokenize(s, nl).iter().map(|t| t.text.to_string()).collect::<Vec<_>>();
+    let toks = |s: &str, nl| {
+      let u: Vec<u16> = s.encode_utf16().collect();
+      tokenize(&u, nl).iter().map(|t| String::from_utf16(&u[t.start as usize..t.end as usize]).unwrap()).collect::<Vec<_>>()
+    };
     assert_eq!(toks("a\n\nb", false), ["a\n", "\n", "b"]);
     assert_eq!(toks("\nx\r\ny\r", false), ["\n", "x\r\n", "y\r"]);
     assert_eq!(toks("a\r\n\nb", true), ["a", "\r\n", "\n", "b"]);

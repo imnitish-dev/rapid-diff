@@ -5,10 +5,10 @@
 [![runtime deps: 0](https://img.shields.io/badge/runtime%20deps-0-brightgreen)](package.json)
 [![license: MIT](https://img.shields.io/npm/l/rapid-diff)](LICENSE)
 
-> jsdiff's `diffLines` and patch functions, 2.6–4.5× faster, with byte-identical output.
+> jsdiff's `diffLines` and patch functions, 2–10× faster, with byte-identical output.
 
 - **Drop-in.** Same function names, same options, same change objects, same patch text as [jsdiff](https://github.com/kpdecker/jsdiff) (`diff` on npm). CI compares the two on tens of thousands of random inputs.
-- **Faster.** A Rust port of jsdiff's own algorithm, so results match exactly; lines are compared as integers and text is never copied back to JS ([benchmarks](#benchmarks)).
+- **Faster.** A Rust port of jsdiff's own algorithm, so results match exactly. Strings are read in JS's own UTF-16 format (no re-encoding), lines are compared as integers, and text is never copied back to JS ([benchmarks](#benchmarks)).
 - **Plug and play.** No `init()`, no config, zero dependencies. TypeScript types included.
 - **Runs everywhere.** Native addon in Node and Bun, WebAssembly (20 KB gzipped) in browsers, Deno and edge runtimes, picked automatically.
 
@@ -65,23 +65,26 @@ Not supported: the `comparator` option (it would call back into JS for every com
 
 ## Benchmarks
 
-Public API on both sides (including moving strings between JS and Rust and building change objects), median of 5. Node 24, Apple M1 Max. Reproduce: `npm run build && cd bench && npm install && node bench.js`.
+Public API on both sides (including moving strings between JS and Rust and building change objects), median of 5. Node 24, Apple M1 Max, native build. Reproduce: `npm run build && cd bench && npm install && node bench.js`.
 
-| Scenario | Function | jsdiff 9 | rapid-diff | Speedup |
-|---|---|---|---|---|
-| Large file, small edit (360 KB, ~2% of lines) | `diffLines` | 16 ms | **5.4 ms** | **2.9×** |
-| | `createTwoFilesPatch` | 16 ms | **6.3 ms** | **2.6×** |
-| Typical source file (20 KB, a few edits) | `diffLines` | 0.98 ms | **0.29 ms** | **3.4×** |
-| | `createTwoFilesPatch` | 1.04 ms | **0.36 ms** | **2.9×** |
-| Completely different files (2,000 lines each) | `diffLines` | 415 ms | **93 ms** | **4.5×** |
-| | `createTwoFilesPatch` | 417 ms | **93 ms** | **4.5×** |
-| 1,000 tiny diffs (2 KB each) | `diffLines` | 13 ms | 13 ms | 1.0× |
+jsdiff's unreleased 10.0 (its `master` branch, Nov 2026) is much faster than 9.0, so both are shown:
 
-The WebAssembly build performs about the same as native here (single-threaded work either way).
+| Scenario | Function | jsdiff 9 | jsdiff 10 (unreleased) | rapid-diff | vs 9 | vs 10 |
+|---|---|---|---|---|---|---|
+| Large file, small edit (360 KB, ~2% of lines) | `diffLines` | 17 ms | 6.4 ms | **2.2 ms** | **7.7×** | **2.9×** |
+| | `createTwoFilesPatch` | 17 ms | 6.6 ms | **3.0 ms** | **5.6×** | **2.2×** |
+| Typical source file (20 KB, a few edits) | `diffLines` | 0.94 ms | 0.30 ms | **0.13 ms** | **7.3×** | **2.3×** |
+| | `createTwoFilesPatch` | 0.95 ms | 0.45 ms | **0.20 ms** | **4.8×** | **2.2×** |
+| 1,000 small diffs (2 KB each) | `diffLines` | 14 ms | 9.1 ms | **5.7 ms** | **2.4×** | **1.6×** |
+| | `createTwoFilesPatch` | 24 ms | 19 ms | **15 ms** | **1.6×** | **1.2×** |
+| Completely different files (2,000 lines each) | `diffLines` | 425 ms | 118 ms | **43 ms** | **9.9×** | **2.7×** |
+| | `createTwoFilesPatch` | 427 ms | 119 ms | **44 ms** | **9.8×** | **2.7×** |
+
+**WebAssembly** (browsers, Deno, edge) is slower than native: against jsdiff 10 it's 1.3–1.8× faster on large inputs and about 0.8× (slower) on many small diffs. Its speedup over jsdiff 9 is still 2–6×.
 
 ## When not to use it
 
-- **Lots of tiny diffs.** Below a few KB per call, the cost of crossing into Rust cancels the gain (see the last row).
+- **Lots of tiny diffs in the browser.** In WebAssembly, below a few KB per call, the cost of copying text into WASM cancels the gain.
 - **Character or word diffs, applying patches.** Not implemented. A character-level Rust diff was slower than jsdiff in our tests, so it isn't worth porting.
 - **Custom comparators.** Use jsdiff.
 
