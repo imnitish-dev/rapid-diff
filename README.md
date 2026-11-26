@@ -5,10 +5,10 @@
 [![runtime deps: 0](https://img.shields.io/badge/runtime%20deps-0-brightgreen)](package.json)
 [![license: MIT](https://img.shields.io/npm/l/rapid-diff)](LICENSE)
 
-> jsdiff's `diffLines` and patch functions, 2–10× faster, with byte-identical output.
+> jsdiff's `diffLines` and patch functions, 3–10× faster, with byte-identical output.
 
 - **Drop-in.** Same function names, same options, same change objects, same patch text as [jsdiff](https://github.com/kpdecker/jsdiff) (`diff` on npm). CI compares the two on tens of thousands of random inputs.
-- **Faster.** A Rust port of jsdiff's own algorithm, so results match exactly. Strings are read in JS's own UTF-16 format (no re-encoding), lines are compared as integers, and text is never copied back to JS ([benchmarks](#benchmarks)).
+- **Faster.** A Rust port of jsdiff's own algorithm, so results match exactly. Strings are read in JS's own UTF-16 format (no re-encoding), lines are compared as integers, lines that exist on only one side are set aside before the search (they can never match), and text is never copied back to JS ([benchmarks](#benchmarks)).
 - **Plug and play.** No `init()`, no config, zero dependencies. TypeScript types included.
 - **Runs everywhere.** Native addon in Node and Bun, WebAssembly (20 KB gzipped) in browsers, Deno and edge runtimes, picked automatically.
 
@@ -71,16 +71,18 @@ jsdiff's unreleased 10.0 (its `master` branch, Nov 2026) is much faster than 9.0
 
 | Scenario | Function | jsdiff 9 | jsdiff 10 (unreleased) | rapid-diff | vs 9 | vs 10 |
 |---|---|---|---|---|---|---|
-| Large file, small edit (360 KB, ~2% of lines) | `diffLines` | 17 ms | 6.4 ms | **2.2 ms** | **7.7×** | **2.9×** |
-| | `createTwoFilesPatch` | 17 ms | 6.6 ms | **3.0 ms** | **5.6×** | **2.2×** |
-| Typical source file (20 KB, a few edits) | `diffLines` | 0.94 ms | 0.30 ms | **0.13 ms** | **7.3×** | **2.3×** |
-| | `createTwoFilesPatch` | 0.95 ms | 0.45 ms | **0.20 ms** | **4.8×** | **2.2×** |
-| 1,000 small diffs (2 KB each) | `diffLines` | 14 ms | 9.1 ms | **5.7 ms** | **2.4×** | **1.6×** |
-| | `createTwoFilesPatch` | 24 ms | 19 ms | **15 ms** | **1.6×** | **1.2×** |
-| Completely different files (2,000 lines each) | `diffLines` | 425 ms | 118 ms | **43 ms** | **9.9×** | **2.7×** |
-| | `createTwoFilesPatch` | 427 ms | 119 ms | **44 ms** | **9.8×** | **2.7×** |
+| Large file, small edit (360 KB, ~2% of lines) | `diffLines` | 17 ms | 6.5 ms | **1.6 ms** | **10×** | **4.0×** |
+| | `createTwoFilesPatch` | 17 ms | 6.5 ms | **2.2 ms** | **7.6×** | **2.9×** |
+| Typical source file (20 KB, a few edits) | `diffLines` | 0.94 ms | 0.35 ms | **0.09 ms** | **10×** | **3.7×** |
+| | `createTwoFilesPatch` | 0.95 ms | 0.39 ms | **0.14 ms** | **6.8×** | **2.7×** |
+| 1,000 small diffs (2 KB each) | `diffLines` | 14 ms | 9.2 ms | **5.3 ms** | **2.6×** | **1.7×** |
+| | `createTwoFilesPatch` | 24 ms | 19 ms | **15 ms** | **1.6×** | **1.3×** |
+| Completely different files (2,000 lines each) | `diffLines` | 425 ms | 118 ms | **0.06 ms** | huge | huge |
+| | `createTwoFilesPatch` | 427 ms | 118 ms | **0.57 ms** | huge | huge |
 
-**WebAssembly** (browsers, Deno, edge) is slower than native: against jsdiff 10 it's 1.3–1.8× faster on large inputs and about 0.8× (slower) on many small diffs. Its speedup over jsdiff 9 is still 2–6×.
+The last row is the "set aside one-sided lines" step: files with nothing in common need no search at all. jsdiff has the same idea in review ([PR #744](https://github.com/kpdecker/jsdiff/pull/744)) and will close most of that gap if it ships.
+
+**WebAssembly** (browsers, Deno, edge) is slower than native: against jsdiff 10 it's 1.4–2× faster on real files and about the same (0.9–1.0×) on many small diffs.
 
 ## When not to use it
 

@@ -22,7 +22,7 @@ function edit(s) {
     const i = rand(lines.length + 1);
     const op = rand(4);
     if (op === 0) lines.splice(i, 1);
-    else if (op === 1) lines.splice(i, 0, pick(WORDS));
+    else if (op === 1) lines.splice(i, 0, rand(2) ? pick(WORDS) : 'only here ' + rand(1e6)); // one-sided lines exercise the discard step
     else if (op === 2 && lines[i] !== undefined) lines[i] = lines[i].toUpperCase();
     else if (lines[i] !== undefined) lines[i] = '  ' + lines[i] + ' ';
   }

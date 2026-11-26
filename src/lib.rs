@@ -158,21 +158,15 @@ fn now_ms() -> f64 {
   date_now()
 }
 
-/// Diff two strings by lines. Returns `[kind, count, start16, end16]` per change object
-/// (kind 0 = common, 1 = added, 2 = removed; offsets index the new string for kinds 0/1 and the
-/// old string for kind 2), or `None` when `maxEditLength`/`timeout` is exceeded (jsdiff: undefined).
-pub fn diff_lines(old: &[u16], new: &[u16], flags: u32, max_edit_length: Option<f64>, timeout_ms: Option<f64>) -> Option<Vec<u32>> {
-  let nl_token = flags & NEWLINE_IS_TOKEN != 0;
-  let one_per_token = flags & ONE_CHANGE_PER_TOKEN != 0;
-  let old_toks = tokenize(old, nl_token);
-  let new_toks = tokenize(new, nl_token);
+/// Component kinds in the packed output.
+const EQUAL: u32 = 0;
+const ADDED: u32 = 1;
+const REMOVED: u32 = 2;
 
-  // Intern by comparison key: equal lines get equal ids, so the search compares integers.
-  let mut ids = HashMap::with_capacity_and_hasher(old_toks.len() + new_toks.len(), Default::default());
-  let o = intern(old, &old_toks, flags, &mut ids);
-  let n = intern(new, &new_toks, flags, &mut ids);
+/// jsdiff's Myers search (base.js `diff`) over interned tokens. Returns the change components
+/// as (kind, count), or `None` when `max_edit` or the deadline is exceeded.
+fn myers(o: &[u32], n: &[u32], one_per_token: bool, max_edit: i64, deadline: Option<f64>) -> Option<Vec<(u32, u32)>> {
   let (old_len, new_len) = (o.len() as i64, n.len() as i64);
-
   let mut arena = Arena::default();
   let extract_common = |arena: &mut Arena, base: &mut Path, diagonal: i64| -> i64 {
     let mut old_pos = base.old_pos;
@@ -204,43 +198,18 @@ pub fn diff_lines(old: &[u16], new: &[u16], flags: u32, max_edit_length: Option<
     };
     Path { old_pos: path.old_pos + old_inc, last }
   };
-
-  let build = |arena: &Arena, last: u32| -> Vec<u32> {
-    let mut comps = Vec::new();
+  let comps = |arena: &Arena, last: u32| -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
     let mut cur = last;
     while cur != NONE {
       let c = &arena.comps[cur as usize];
-      comps.push((c.count, c.added, c.removed));
+      out.push((if c.removed { REMOVED } else if c.added { ADDED } else { EQUAL }, c.count));
       cur = c.prev;
     }
-    comps.reverse();
-    let (mut np, mut op) = (0usize, 0usize);
-    let mut out = Vec::with_capacity(comps.len() * 4);
-    let range = |toks: &[Token], from: usize, count: usize| match count {
-      0 => (0, 0),
-      _ => (toks[from].start, toks[from + count - 1].end),
-    };
-    for (count, added, removed) in comps {
-      let c = count as usize;
-      let (kind, (s, e)) = if removed {
-        let r = range(&old_toks, op, c);
-        op += c;
-        (2, r)
-      } else {
-        let r = range(&new_toks, np, c);
-        np += c;
-        if !added {
-          op += c;
-        }
-        (if added { 1 } else { 0 }, r)
-      };
-      out.extend([kind, count, s, e]);
-    }
+    out.reverse();
     out
   };
 
-  let max_edit = max_edit_length.map_or(new_len + old_len, |m| (m as i64).min(new_len + old_len));
-  let deadline = timeout_ms.map(|t| now_ms() + t);
   let size = (2 * (new_len + old_len) + 3) as usize;
   let offset = new_len + old_len + 1; // diagonal d lives at index d + offset
   let mut best: Vec<Option<Path>> = vec![None; size];
@@ -248,7 +217,7 @@ pub fn diff_lines(old: &[u16], new: &[u16], flags: u32, max_edit_length: Option<
   let mut first = Path { old_pos: -1, last: NONE };
   let new_pos = extract_common(&mut arena, &mut first, 0);
   if first.old_pos + 1 >= old_len && new_pos + 1 >= new_len {
-    return Some(build(&arena, first.last));
+    return Some(comps(&arena, first.last));
   }
   best[offset as usize] = Some(first);
 
@@ -284,7 +253,7 @@ pub fn diff_lines(old: &[u16], new: &[u16], flags: u32, max_edit_length: Option<
       }
       let new_pos = extract_common(&mut arena, &mut base, diag);
       if base.old_pos + 1 >= old_len && new_pos + 1 >= new_len {
-        return Some(build(&arena, base.last));
+        return Some(comps(&arena, base.last));
       }
       if base.old_pos + 1 >= old_len {
         max_diag = max_diag.min(diag - 1);
@@ -300,6 +269,113 @@ pub fn diff_lines(old: &[u16], new: &[u16], flags: u32, max_edit_length: Option<
     edit_len += 1;
   }
   None
+}
+
+/// Like `myers`, but first drops tokens that occur on only one side (they can never match),
+/// searches the smaller remainder, then puts them back as removals/insertions. Same idea and
+/// same output as jsdiff PR #744 (and GNU diff's discard step): within a run of edits jsdiff
+/// always emits removals before insertions, so the run is fully described by its two gaps.
+fn myers_discarding(o: &[u32], n: &[u32], ids: usize, one_per_token: bool, max_edit: i64, deadline: Option<f64>) -> Option<Vec<(u32, u32)>> {
+  let (mut in_old, mut in_new) = (vec![false; ids], vec![false; ids]);
+  o.iter().for_each(|&t| in_old[t as usize] = true);
+  n.iter().for_each(|&t| in_new[t as usize] = true);
+  let old_keep: Vec<u32> = (0..o.len() as u32).filter(|&i| in_new[o[i as usize] as usize]).collect();
+  let new_keep: Vec<u32> = (0..n.len() as u32).filter(|&i| in_old[n[i as usize] as usize]).collect();
+  let discarded = (o.len() - old_keep.len() + n.len() - new_keep.len()) as i64;
+  if discarded == 0 {
+    return myers(o, n, one_per_token, max_edit, deadline);
+  }
+  if discarded > max_edit {
+    return None; // every discarded token is an edit
+  }
+  let os: Vec<u32> = old_keep.iter().map(|&i| o[i as usize]).collect();
+  let ns: Vec<u32> = new_keep.iter().map(|&i| n[i as usize]).collect();
+  let skeleton = myers(&os, &ns, one_per_token, max_edit - discarded, deadline)?;
+
+  // Rebuild from the matched pairs: gaps become removals then insertions, matches join up.
+  let mut out: Vec<(u32, u32)> = Vec::new();
+  let push = |out: &mut Vec<(u32, u32)>, kind: u32, count: u32| {
+    if count == 0 {
+      return;
+    }
+    if one_per_token {
+      out.extend(std::iter::repeat_n((kind, 1), count as usize));
+    } else if let Some(last) = out.last_mut().filter(|l| l.0 == kind) {
+      last.1 += count;
+    } else {
+      out.push((kind, count));
+    }
+  };
+  let (mut op, mut np) = (0u32, 0u32); // next unemitted token, full arrays
+  let (mut so, mut sn) = (0usize, 0usize); // position in the skeleton
+  for (kind, count) in skeleton {
+    match kind {
+      REMOVED => so += count as usize,
+      ADDED => sn += count as usize,
+      _ => {
+        for k in 0..count as usize {
+          let (oi, ni) = (old_keep[so + k], new_keep[sn + k]);
+          push(&mut out, REMOVED, oi - op);
+          push(&mut out, ADDED, ni - np);
+          // Matches split by a gap must stay separate components, so only merge across none.
+          if oi == op && ni == np && !one_per_token && out.last().is_some_and(|l| l.0 == EQUAL) {
+            out.last_mut().unwrap().1 += 1;
+          } else {
+            out.push((EQUAL, 1));
+          }
+          (op, np) = (oi + 1, ni + 1);
+        }
+        so += count as usize;
+        sn += count as usize;
+      }
+    }
+  }
+  push(&mut out, REMOVED, o.len() as u32 - op);
+  push(&mut out, ADDED, n.len() as u32 - np);
+  Some(out)
+}
+
+/// Diff two strings (as UTF-16 units) by lines. Returns `[kind, count, start16, end16]` per change
+/// object (kind 0 = common, 1 = added, 2 = removed; offsets index the new string for kinds 0/1 and
+/// the old string for kind 2), or `None` when `maxEditLength`/`timeout` is exceeded (jsdiff: undefined).
+pub fn diff_lines(old: &[u16], new: &[u16], flags: u32, max_edit_length: Option<f64>, timeout_ms: Option<f64>) -> Option<Vec<u32>> {
+  let nl_token = flags & NEWLINE_IS_TOKEN != 0;
+  let one_per_token = flags & ONE_CHANGE_PER_TOKEN != 0;
+  let old_toks = tokenize(old, nl_token);
+  let new_toks = tokenize(new, nl_token);
+
+  // Intern by comparison key: equal lines get equal ids, so the search compares integers.
+  let mut ids = HashMap::with_capacity_and_hasher(old_toks.len() + new_toks.len(), Default::default());
+  let o = intern(old, &old_toks, flags, &mut ids);
+  let n = intern(new, &new_toks, flags, &mut ids);
+  let total = (o.len() + n.len()) as i64;
+  let max_edit = max_edit_length.map_or(total, |m| (m as i64).min(total));
+  let deadline = timeout_ms.map(|t| now_ms() + t);
+
+  let comps = myers_discarding(&o, &n, ids.len(), one_per_token, max_edit, deadline)?;
+  let (mut np, mut op) = (0usize, 0usize);
+  let mut out = Vec::with_capacity(comps.len() * 4);
+  let range = |toks: &[Token], from: usize, count: usize| match count {
+    0 => (0, 0),
+    _ => (toks[from].start, toks[from + count - 1].end),
+  };
+  for (kind, count) in comps {
+    let c = count as usize;
+    let (s, e) = if kind == REMOVED {
+      let r = range(&old_toks, op, c);
+      op += c;
+      r
+    } else {
+      let r = range(&new_toks, np, c);
+      np += c;
+      if kind == EQUAL {
+        op += c;
+      }
+      r
+    };
+    out.extend([kind, count, s, e]);
+  }
+  Some(out)
 }
 
 #[cfg(feature = "napi")]
