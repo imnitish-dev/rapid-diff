@@ -116,6 +116,7 @@ jobs:
         with: { path: native, pattern: native-*, merge-multiple: true }
       - uses: actions/download-artifact@v8
         with: { path: wasm, name: wasm }
+      - run: npm ci
       - run: npm test
         env: { RAPID_DIFF_EXPECT: native }
       - run: npm test
@@ -133,6 +134,7 @@ jobs:
         with: { path: native, pattern: native-*, merge-multiple: true }
       - uses: actions/download-artifact@v8
         with: { path: wasm, name: wasm }
+      - run: npm ci
       - run: npm test
         env: { RAPID_DIFF_EXPECT: native }
 
