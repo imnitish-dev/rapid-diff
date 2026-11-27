@@ -1,6 +1,6 @@
 {
   "name": "rapid-diff",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Fast line/word diffs and unified patches for every JavaScript runtime, with a jsdiff-compatible API. Rust core: native in Node and Bun, WebAssembly in browsers and edge.",
   "license": "MIT",
   "type": "module",
